@@ -1,0 +1,384 @@
+import sys
+sys.path.append('/home/demon/vtest/addons')
+import pexpect
+import re
+class CedgeSession():
+    def __init__(self, cedge_ip = "10.0.1.15", hostname = 'vm5', cedge_port = 22, username='admin', password='admin', logfile = "vm5.log"):
+        # import pdb
+        # pdb.set_trace()
+        self.ip = cedge_ip
+        self.hostname = str(hostname)
+        self.port = cedge_port
+        self.username = username
+        self.password = password
+        self.logfile = open(logfile, 'w')
+        self.timeout =  5
+        self.session = self.create_cEdge_session(self.ip, self.username, self.password, self.logfile, self.timeout)      
+
+    def create_cEdge_session(self, cEdgeIp, username, password, logfile = None, timeout = 5):
+        """create new session for cedge"""
+        cmd = 'ssh -o StrictHostKeyChecking=no '
+        cmd += '-o UserKnownHostsFile=/dev/null '
+        cmd += '-o ConnectTimeout=10 '
+        cmd += '-o LogLevel=QUIET -l %s %s' % (username, cEdgeIp)
+    
+        pySession = pexpect.spawn(cmd, timeout=timeout)  
+        if logfile is not None:
+            pySession.logfile = sys.stdout
+            pySession.logfile = logfile
+        # import pdb
+        # pdb.set_trace()    
+        promptMatchedID = pySession.expect(['Password:', pexpect.TIMEOUT], timeout)
+        if promptMatchedID == 0:
+            pySession.sendline(password)
+            pySession.expect('.*\#')
+            pySession.sendline('terminal length 0')
+            pySession.expect('.*\#')
+        else:
+            print("Couldn't connect to Node, please manually test ssh!")   
+        return pySession
+
+    def relogin_cEdge_session(self):
+        """reCreate new session for cedge"""
+        cEdgeIp, username, password, logfile, timeout = self.ip, self.username, self.password, self.logfile, self.timeout
+
+        self.session.close()
+        """reGet the session for cisco cedge"""
+        cmd = 'ssh -o StrictHostKeyChecking=no '
+        cmd += '-o UserKnownHostsFile=/dev/null '
+        cmd += '-o ConnectTimeout=10 '
+        cmd += '-o LogLevel=QUIET -l %s %s' % (username, cEdgeIp)
+
+        pySession = pexpect.spawn(cmd, timeout=timeout)  
+        if logfile is not None:
+            pySession.logfile = sys.stdout
+            pySession.logfile = logfile    
+        promptMatchedID = pySession.expect(['Password:', pexpect.TIMEOUT], timeout)
+        if promptMatchedID == 0:
+            pySession.sendline(password)
+            pySession.expect('.*\#')
+            pySession.sendline('terminal length 0')
+            pySession.expect('.*\#')
+        else:
+            raise Exception("Couldn't connect to Node, please manually test ssh!")
+        self.session = pySession
+    
+    def get_currentMode(self):
+        machine, session = self.hostname, self.session
+
+        promptList = ['%s#' %(machine), '%s\(config.*\)#' %(machine), '\[%s:/.*\]\$' %(machine), '--More--', pexpect.TIMEOUT, pexpect.EOF]
+        if not session.isalive():
+          return [False, 'session is down']
+        self.clear_session_cache()
+        session.send('\n')
+        promptMatchedID = session.expect(promptList, timeout= 10)
+        if promptMatchedID == 0:
+          mode = "exec_confd_mode"
+          session.sendline('terminal length 0')
+          promptMatchedID = session.expect(['%s#' %(machine), pexpect.TIMEOUT], timeout = 30)
+          if promptMatchedID == 1:
+            termStatus = False
+            modeResult = "It is exec_confd_mode, but find unknown error"
+            return [termStatus, modeResult]
+          if 'syntax error' in session.before:
+            termStatus = True
+            modeResult = 'confd'
+            return [termStatus, modeResult]
+          else:
+            termStatus = True
+            modeResult = 'exec'
+            return [termStatus, modeResult]       
+        elif promptMatchedID == 1:
+          termStatus = True
+          session.sendline('abort')
+          promptMatchedID = session.expect(['%s#' %(machine), '[%s:/.*]$' %(machine), pexpect.TIMEOUT], timeout= 30)
+          if promptMatchedID == 2:
+            termStatus = False
+            modeResult = "It is configure mode before, but after send abort, it find unknown error"
+            return [termStatus, modeResult]
+          elif promptMatchedID == 0:
+            termStatus = True
+            modeResult = 'exec'
+            return [termStatus, modeResult]
+          else:
+            termStatus = True
+            modeResult = 'shell'
+            return [termStatus, modeResult]  
+        elif promptMatchedID == 2:
+          termStatus = True
+          modeResult = 'shell'
+          return [termStatus, modeResult]  
+        elif promptMatchedID == 3:
+          session.send('q')
+          session.sendcontrol('u')
+          return get_currentMode(machine, session)
+        elif promptMatchedID == 4:
+          termStatus = False
+          modeResult = "couldn't detect current mode"
+          return [termStatus, modeResult]
+        else:
+          termStatus = False
+          modeResult = "Session unexpectedly shutdown"
+          return [termStatus, modeResult] 
+    
+    def clear_session_cache(self):
+      session = self.session
+      if not session.isalive():
+        return [False, 'session is down']
+    
+      buffer = ''
+      while not session.expect([r'.+', pexpect.TIMEOUT], timeout = 0.5):
+        buffer += session.after
+      return [True, buffer]
+    
+    def switch_To_confd_mode(self):
+        machine, session = self.hostname, self.session
+
+        modeReult = self.get_currentMode()
+        if modeReult[0]:
+          mode = modeReult[1]
+        else:
+          return modeReult
+        if mode == 'exec':
+          session.sendline('request platform software system shell')
+          session.expect('Are you sure you want to continue')
+          session.send('y')
+          session.expect('\[%s:/.*\]\$' %(machine))
+          session.sendline('confd_cli -C -P 3010 -noaaa -g sdwan-oper')
+          session.expect('%s#' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'shell':
+          session.sendline('confd_cli -C -P 3010 -noaaa -g sdwan-oper')
+          session.expect('%s#' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'confd':
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+    
+    def switch_To_shell_mode(self):
+        machine, session = self.hostname, self.session
+
+        modeReult = self.get_currentMode()
+        if modeReult[0]:
+          mode = modeReult[1]
+        else:
+          return modeReult
+        if mode == 'exec':
+          session.sendline('request platform software system shell')
+          session.expect('Are you sure you want to continue')
+          session.send('y')
+          session.expect('\[%s:/.*\]\$' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'shell':
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'confd':
+          session.sendline('exit')
+          session.expect('\[%s:/.*\]\$' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+    
+    def switch_To_exec_mode(self):
+        machine, session = self.hostname, self.session
+
+        modeReult = self.get_currentMode()
+        if modeReult[0]:
+          mode = modeReult[1]
+        else:
+          return modeReult
+        if mode == 'exec':
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'shell':
+          session.sendline('exit')
+          session.expect('%s#' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'confd':
+          session.sendline('exit')
+          session.expect('\[%s:/.*\]\$' %(machine))
+          session.sendline('exit')
+          session.expect('%s#' %(machine))
+          buffer = self.clear_session_cache()
+          return [True, buffer] 
+
+    def switch_To_conf_mode(self):
+        machine, session = self.hostname, self.session
+
+        modeReult = self.get_currentMode()
+        if modeReult[0]:
+          mode = modeReult[1]
+        else:
+          return modeReult
+        if mode == 'exec':
+          session.sendline('config-transaction')
+          promptMatchedID = session.expect(['%s\(config\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+          if promptMatchedID != 0:
+            return [False, "Unknown error, it supposes to expect"]
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'shell':
+          session.sendline('exit')
+          session.expect('%s#' %(machine))
+          session.sendline('config-transaction')
+          promptMatchedID = session.expect(['%s\(config\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+          if promptMatchedID != 0:
+            return [False, "Unknown error, it supposes to expect"]
+          buffer = self.clear_session_cache()
+          return [True, buffer]
+        elif mode == 'confd':
+          session.sendline('exit')
+          session.expect('\[%s:/.*\]\$' %(machine))
+          session.sendline('exit')
+          session.expect('%s#' %(machine))
+          session.sendline('config-transaction')
+          promptMatchedID = session.expect(['%s\(config\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+          if promptMatchedID != 0:
+            return [False, "Unknown error, it supposes to expect"]
+          buffer = self.clear_session_cache()
+          return [True, buffer] 
+
+    def shell_exec_cmd(self, cmd, returnExec = False):
+        machine, session = self.hostname, self.session
+
+        if not session.isalive():
+          self.relogin_cEdge_session()
+          session = self.session
+
+        reVal = self.switch_To_shell_mode()
+        if reVal[0]:
+            if type(cmd) == list:
+                returnList = []
+                for eachCMDLine in cmd:
+                    session.sendline(eachCMDLine)
+                    promptMatchedID = session.expect(['\[%s:/.*\]\$' %(machine), pexpect.TIMEOUT], timeout=10)
+                    if promptMatchedID != 0:
+                        return [False, "Unknown error, it supposes to expect"]  
+                    cliOutput = session.before
+                    returnList.append(cliOutput) 
+                if returnExec:
+                    session.sendline('exit')
+                return [True, returnList]                 
+            else:
+                session.sendline(cmd)
+                promptMatchedID = session.expect(['\[%s:/.*\]\$' %(machine), pexpect.TIMEOUT], timeout=10)
+                cliOutput = session.before
+                if returnExec:
+                    session.sendline('exit')
+                if promptMatchedID == 0:
+                    return [True, str(cliOutput).split('\r\n')[1:-1]]  
+                else:
+                    return [False, "Unknown error, it supposes to expect"]
+        else:
+            return reVal
+    
+    def confd_exec_cmd(self, cmd, returnExec = False):
+        machine, session = self.hostname, self.session
+
+        if not session.isalive():
+          self.relogin_cEdge_session()
+          session = self.session
+
+        reVal = self.switch_To_shell_mode()
+        if reVal[0]:
+            if type(cmd) == list:
+                returnList = []
+                for eachCMDLine in cmd:
+                    session.sendline(eachCMDLine)
+                    promptMatchedID = session.expect(['\[%s:/.*\]\$' %(machine), pexpect.TIMEOUT], timeout=10)
+                    if promptMatchedID != 0:
+                        return [False, "Unknown error, it supposes to expect"]  
+                    cliOutput = session.before
+                    returnList.append(cliOutput) 
+                if returnExec:
+                    session.sendline('exit')
+                return [True, returnList]                 
+            else:
+                session.sendline(cmd)
+                promptMatchedID = session.expect(['\[%s:/.*\]\$' %(machine), pexpect.TIMEOUT], timeout=10)
+                cliOutput = session.before
+                if returnExec:
+                    session.sendline('exit')
+                if promptMatchedID == 0:
+                    return [True, str(cliOutput).split('\r\n')[1:-1]]  
+                else:
+                    return [False, "Unknown error, it supposes to expect"]
+        else:
+            return reVal
+
+    def exec_cmd(self, cmd):
+        machine, session = self.hostname, self.session
+
+        if not session.isalive():
+          self.relogin_cEdge_session()
+          session = self.session
+
+        reVal = self.switch_To_exec_mode()
+        if reVal[0]:
+            if type(cmd) == list:
+                returnList = []
+                for eachCMDLine in cmd:
+                    session.sendline(eachCMDLine)
+                    promptMatchedID = session.expect(['%s#' %(machine), pexpect.TIMEOUT], timeout=10)
+                    if promptMatchedID != 0:
+                        return [False, "Unknown error, it supposes to expect"]  
+                    cliOutput = session.before
+                    returnList.append(cliOutput) 
+                return [True, returnList]                 
+            else:
+                session.sendline(cmd)
+                promptMatchedID = session.expect(['%s#' %(machine), pexpect.TIMEOUT], timeout=10)
+                cliOutput = session.before
+                if promptMatchedID == 0:
+                    return [True, str(cliOutput).split('\r\n')[1:-1]]  
+                else:
+                    return [False, "Unknown error, it supposes to expect"]
+        else:
+            return reVal
+
+    def conf_cmd(self, cmd):
+        machine, session = self.hostname, self.session
+
+        if not session.isalive():
+          self.relogin_cEdge_session()
+          session = self.session
+
+        reVal = self.switch_To_conf_mode()
+        if reVal[0]:
+            if type(cmd) == list:
+                returnList = []
+                for eachCMDLine in cmd:
+                    session.sendline(eachCMDLine)
+                    promptMatchedID = session.expect(['%s\(config.*\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+                    if promptMatchedID != 0:
+                        return [False, "Unknown error, it supposes to expect"]  
+                    cliOutput = session.before
+                    returnList.append(cliOutput)
+
+                session.sendline("commit")
+                promptMatchedID = session.expect(['%s\(config.*\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+                if promptMatchedID != 0:
+                  return [False, "fail to commit"]
+                commitResult = session.before
+
+                return [True, commitResult, returnList]                 
+            else:
+                session.sendline(cmd)
+                promptMatchedID = session.expect(['%s\(config.*\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+                cliOutput = session.before
+                if promptMatchedID != 0:
+                    return [False, "Unknown error, it supposes to expect"]
+
+                session.sendline("commit")
+                promptMatchedID = session.expect(['%s\(config.*\)#' %(machine), pexpect.TIMEOUT], timeout=10)
+                if promptMatchedID != 0:
+                  return [False, "fail to commit"]
+                commitResult = session.before
+
+                return [True, commitResult, cliOutput]  
+        else:
+            return reVal
+
